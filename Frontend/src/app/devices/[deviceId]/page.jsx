@@ -4,6 +4,7 @@ import Link from 'next/link.js';
 import { use, useState, useEffect, useRef } from 'react';
 import { Button, Container } from 'react-bootstrap';
 import { Manager } from 'socket.io-client';
+import { apiUrl } from '../../../api.ts';
 
 // export default function Page({
 //   params,
@@ -21,12 +22,12 @@ export default function Page({ params }) {
   const deviceRef = useRef(device);
 
   useEffect(() => {
-    fetch(`http://localhost:4000/devices/${deviceId}`).then(r => r.json()).then(data => { setDevice(data); deviceRef.current = data; });
+    fetch(`${apiUrl()}/devices/${deviceId}`).then(r => r.json()).then(data => { setDevice(data); deviceRef.current = data; });
   }, []);
 
   useEffect(() => {
 
-    const manager = new Manager("http://localhost:4000", {
+    const manager = new Manager(apiUrl(), {
       reconnectionDelayMax: 10000,
     });
 
@@ -55,7 +56,7 @@ export default function Page({ params }) {
     let unpair = confirm("Are you sure you want to unpair this device?");
 
     if (unpair) {
-      fetch(`http://localhost:4000/devices/${deviceId}`, { method: "DELETE" });
+      fetch(`${apiUrl()}/devices/${deviceId}`, { method: "DELETE" });
     }
   };
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Forecast } from "./device.ts";
 import ForecastTimeline from "./forecastTimeline.tsx";
 import { Manager } from "socket.io-client";
+import { apiUrl } from './api.ts';
 
 type DeviceViewProps = {
     nodeId: string;
@@ -14,7 +15,7 @@ const DeviceView = ({ nodeId, currentTime }: DeviceViewProps) => {
 
     useEffect(() => {
 
-        const manager = new Manager("http://localhost:4000", {
+        const manager = new Manager(apiUrl(), {
             reconnectionDelayMax: 10000,
         });
 
@@ -46,7 +47,7 @@ const DeviceView = ({ nodeId, currentTime }: DeviceViewProps) => {
 
         console.log('Fetching initial forecast data');
 
-        fetch(`http://localhost:4000/devices/${nodeId}/forecast`).then(r => r.status === 200 ? r.json() : null).then(data => {
+        fetch(`${apiUrl()}/devices/${nodeId}/forecast`).then(r => r.status === 200 ? r.json() : null).then(data => {
 
             if (data) {
                 let forecast: Forecast = {

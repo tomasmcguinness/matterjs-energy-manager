@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Container } from 'react-bootstrap';
 import Button from 'react-bootstrap/Button';
 import Form from 'react-bootstrap/Form';
+import { apiUrl } from '../../../api.ts';
 
 const SocketComponent = () => {
 
@@ -16,7 +17,7 @@ const SocketComponent = () => {
       manualSetupCode,
     });
 
-    fetch('http://localhost:4000/devices', {
+    fetch(apiUrl('/devices'), {
       headers: {
         "Content-Type": "application/json",
       },

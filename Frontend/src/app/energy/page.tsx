@@ -3,6 +3,7 @@
 import TariffTimeline from '../../tariffTimeline.tsx';
 import { useEffect, useState } from 'react';
 import DeviceView from '../../deviceView.tsx';
+import { apiUrl } from '../../api.ts';
 
 export default function Page() {
 
@@ -14,15 +15,21 @@ export default function Page() {
   const [devices, setDevices] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch('http://localhost:4000/tariff').then(r => r.json()).then(data => { setPrices(data); });
-    fetch('http://localhost:4000/devices').then(r => r.json()).then(data => { setDevices(data); });
+    fetch(apiUrl('/tariff')).then(r => r.json()).then(data => { setPrices(data); });
+    fetch(apiUrl('/devices')).then(r => r.json()).then(data => { setDevices(data); });
 
     setCurrentTime(new Date())
+
+    // Keep the "now" markers moving.
+    //
+    const timer = setInterval(() => setCurrentTime(new Date()), 60 * 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
   const handleOptimiseClick = () => {
     setIsOptimising(true);
-    fetch(`http://localhost:4000/optimise`, { method: "POST" }).then(() => setIsOptimising(false));
+    fetch(`${apiUrl()}/optimise`, { method: "POST" }).then(() => setIsOptimising(false));
   };
 
   var deviceCards = devices.map((device, index) => {

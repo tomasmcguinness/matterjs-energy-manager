@@ -2,7 +2,7 @@ import { NodeStates, PairedNode } from "@project-chip/matter.js/device"
 
 export type Slot = {
     nominalPower: number,
-    duration: number
+    defaultDuration: number
 }
 
 export type Forecast = {
@@ -15,7 +15,10 @@ type Device = {
     id: string,
     state?: string,
     manufacturer?: string,
-    forecast?: Forecast
+    forecast?: Forecast,
+    deviceTypes: number[],
+    supportsTrustedTimeSource?: boolean,
+    usesEnergyManagerTime?: boolean
 }
 
 export default Device;

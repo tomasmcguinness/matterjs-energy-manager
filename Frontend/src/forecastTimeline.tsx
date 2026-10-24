@@ -1,89 +1,44 @@
 'use client'
 
-import { useRef, useState, useEffect } from "react";
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
 import { Forecast } from "./device.ts";
-import {
-    Chart as ChartJS,
-    CategoryScale,
-    LinearScale,
-    PointElement,
-    LineElement,
-    Title,
-    Tooltip,
-    Legend,
-} from 'chart.js';
-
-ChartJS.register(
-    CategoryScale,
-    LinearScale,
-    PointElement,
-    LineElement,
-    Title,
-    Tooltip,
-    Legend
-);
+import { dayDomain, dayTicks, formatTime, Y_AXIS_WIDTH } from './timeline.ts';
 
 type EnergyTimelineProps = {
-    forecast?: Forecast;
+    forecast?: Forecast | null;
+    currentTime?: Date;
 };
 
-const ForecastTimeline = ({ forecast }: EnergyTimelineProps) => {
-
-    const [containerWidth, setContainerWidth] = useState<number>(10);
-
-    const containerRef = useRef(null);
-
-    useEffect(() => {
-        setTimeout(() => {
-            if (containerRef.current) {
-                setContainerWidth(containerRef.current.getBoundingClientRect().width);
-            }
-        }, 0);
-    }, [])
-
-    console.log("Rendering EnergyTimeline with forecast:", forecast);
+const ForecastTimeline = ({ forecast, currentTime = new Date() }: EnergyTimelineProps) => {
 
     if (forecast == null) {
         return <div className="alert alert-info" style={{ marginBottom: '0' }}>No power usage currently forecast</div>;
     }
 
-    let slots = forecast.slots.map((slot, index) => {
+    // Turn the slots into a step series: each slot's power from its start
+    // until the next slot begins, dropping to zero at the end of the forecast.
+    //
+    let time = forecast.startTime * 1000;
 
-        console.log("Rendering slot:", slot);
-
-        const key = `slot_${index}`;
-        const width = (slot.defaultDuration / 86400) * 100; // Scale width for better visibility
-
-        return <div className="slot" key={key} style={{ width: `calc(${width}% - 1px)` }}>{(slot.nominalPower / 1000000).toFixed(3)}kW</div>;
+    const data = forecast.slots.map(slot => {
+        const point = { time, power: slot.nominalPower / 1000000 }; // milliwatts to kilowatts
+        time += slot.defaultDuration * 1000;
+        return point;
     });
 
-    const computeOffset = (startTimeInSeconds: number) => {
+    data.push({ time, power: 0 });
 
-        // Always show relative to midnight today.
-        //
-        let today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        let todayInSeconds = today.getTime() / 1000;
-
-        console.log({ todayInSeconds, startTimeInSeconds });
-
-        let timeDifference = startTimeInSeconds - todayInSeconds;
-
-        // Get the width of the container in pixels
-        //
-        var pixelsPerSection = containerWidth / 86400; // pixels per second
-
-        return `${pixelsPerSection * timeDifference}px`;
-    }
-
-    return <div className="energyForecastContainer">
-        <div className="forecastContainer" style={{ left: computeOffset(forecast.startTime) }}>
-            {containerWidth}
-            <div className="slotsContainer" ref={containerRef}>
-                {slots}
-            </div>
-            <span className="startTime">{new Date(forecast.startTime * 1000).toLocaleTimeString('en-GB', { hour12: false })}</span>
+    return <div>
+        <AreaChart style={{ width: '100%', height: '200px' }} responsive data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="time" type="number" scale="time" domain={dayDomain(currentTime)} ticks={dayTicks(currentTime)} tickFormatter={formatTime} allowDataOverflow />
+            <YAxis width={Y_AXIS_WIDTH} unit="kW" />
+            <Tooltip labelFormatter={formatTime} formatter={(value: number) => [`${value.toFixed(3)}kW`, 'Power']} />
+            <Area type="stepAfter" dataKey="power" stroke="#4A90E2" fill="#4A90E2" fillOpacity={0.6} isAnimationActive={false} />
+            <ReferenceLine strokeDasharray="3 3" x={currentTime.getTime()} stroke="red" />
+        </AreaChart>
+        <div className="text-muted small">
+            Starts {formatTime(forecast.startTime * 1000)} · Ends {formatTime(time)}
         </div>
     </div>;
 }

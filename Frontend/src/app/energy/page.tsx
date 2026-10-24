@@ -12,12 +12,14 @@ export default function Page() {
 
   const [isOptimising, setIsOptimising] = useState<boolean>(false);
   const [prices, setPrices] = useState<Prices | null>(null);
+  const [autoOptimisation, setAutoOptimisation] = useState<boolean | null>(null);
 
   const [devices, setDevices] = useState<any[]>([]);
 
   useEffect(() => {
     fetch(apiUrl('/prices')).then(r => r.json()).then(data => { setPrices(data); });
     fetch(apiUrl('/devices')).then(r => r.json()).then(data => { setDevices(data); });
+    fetch(apiUrl('/auto-optimisation')).then(r => r.json()).then(data => { setAutoOptimisation(data.enabled); });
 
     // The pricing server publishes new prices as they change.
     //
@@ -25,7 +27,10 @@ export default function Page() {
       reconnectionDelayMax: 10000,
     });
 
-    manager.socket("/").on("prices", (data: Prices) => setPrices(data));
+    const socket = manager.socket("/");
+
+    socket.on("prices", (data: Prices) => setPrices(data));
+    socket.on("autoOptimisation", (enabled: boolean) => setAutoOptimisation(enabled));
 
     setCurrentTime(new Date())
 
@@ -38,6 +43,24 @@ export default function Page() {
       manager.engine?.close();
     };
   }, []);
+
+  const hasPrices = prices != null && prices.periods.length > 0;
+
+  const handleAutoOptimisationChange = async (enabled: boolean) => {
+    setAutoOptimisation(enabled);
+
+    const response = await fetch(apiUrl('/auto-optimisation'), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }).catch(() => null);
+
+    // Put the switch back if the change wasn't saved.
+    //
+    if (!response?.ok) {
+      setAutoOptimisation(!enabled);
+    }
+  };
 
   const handleOptimiseClick = () => {
     setIsOptimising(true);
@@ -81,7 +104,18 @@ export default function Page() {
         Optimising Energy Usage
       </div>}
 
-      <button className="btn btn-primary" onClick={handleOptimiseClick}>Optimise</button>
+      {/* Optimising needs prices to compare start times against. While
+          it's automatic, there's no need to optimise by hand. */}
+      {hasPrices && <div className="d-flex align-items-center gap-3">
+        <div className="form-check form-switch mb-0">
+          <input className="form-check-input" type="checkbox" role="switch" id="auto-optimisation"
+            checked={autoOptimisation === true}
+            disabled={autoOptimisation === null}
+            onChange={(event) => handleAutoOptimisationChange(event.target.checked)} />
+          <label className="form-check-label" htmlFor="auto-optimisation">Auto-Optimisation</label>
+        </div>
+        <button className="btn btn-primary" onClick={handleOptimiseClick} disabled={autoOptimisation !== false || isOptimising}>Optimise</button>
+      </div>}
 
     </div>
   </div>;

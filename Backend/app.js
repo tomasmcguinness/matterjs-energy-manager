@@ -242,10 +242,14 @@ const ISO_4217_CODES = { 826: "GBP", 978: "EUR", 840: "USD" };
 //
 let prices = { currency: null, periods: [] };
 
+// The node the prices come from, as a string, or null without one.
+//
+let pricingServerNodeId = null;
+
 // Read the prices from the pricing server's Commodity Price cluster and let
 // the frontend know they've changed.
 //
-async function loadPrices(commodityPrice) {
+async function loadPrices(nodeId, commodityPrice) {
 
     const currency = await commodityPrice.getCurrencyAttribute();
     const currentPrice = await commodityPrice.getCurrentPriceAttribute();
@@ -268,6 +272,12 @@ async function loadPrices(commodityPrice) {
         .sort((a, b) => a.startTime - b.startTime)
         .filter((period, index, sorted) => index === 0 || period.startTime !== sorted[index - 1].startTime);
 
+    // The pricing server may have been unpaired while the prices were read.
+    //
+    if (pricingServerNodeId !== nodeId) {
+        return;
+    }
+
     prices = {
         currency: currency ? (ISO_4217_CODES[currency.currency] ?? currency.currency.toString()) : null,
         periods,
@@ -289,7 +299,11 @@ function watchPrices(node) {
         return;
     }
 
-    const reload = () => loadPrices(commodityPrice).catch(error => console.error('Failed to load prices', error));
+    const nodeId = node.nodeId.toString();
+
+    pricingServerNodeId = nodeId;
+
+    const reload = () => loadPrices(nodeId, commodityPrice).catch(error => console.error('Failed to load prices', error));
 
     commodityPrice.addCurrentPriceAttributeListener(reload);
 
@@ -300,10 +314,34 @@ function watchPrices(node) {
     reload();
 }
 
+// When the pricing server is unpaired, its prices no longer apply, so clear
+// them and let the frontend know.
+//
+function forgetPricingServer(nodeId) {
+
+    if (pricingServerNodeId !== nodeId.toString()) {
+        return;
+    }
+
+    pricingServerNodeId = null;
+    prices = { currency: null, periods: [] };
+
+    console.log(`Pricing server ${nodeId} was unpaired. Prices cleared.`);
+
+    io.emit("prices", prices);
+}
+
 // The forecastId last optimised for each node, so a forecast is only
 // optimised once rather than again when the device reports the adjusted one.
 //
 const optimisedForecastIds = new Map();
+
+// Whether new forecasts are optimised automatically. It's saved, so it
+// survives a restart, and is on unless it has been turned off.
+//
+const settingsStorage = storage.createContext("settings");
+
+let autoOptimisation = await settingsStorage.get("autoOptimisation", true);
 
 // Optimise a newly arrived forecast, if the device allows it.
 //
@@ -314,6 +352,11 @@ async function autoOptimise(node, forecast) {
     }
 
     const nodeKey = node.nodeId.toString();
+
+    if (!autoOptimisation) {
+        console.log(`Automatic optimisation is off. Not optimising forecast ${forecast.forecastId} for node ${nodeKey}.`);
+        return;
+    }
 
     // Our own adjustments come back as LocalOptimization updates.
     //
@@ -361,10 +404,47 @@ async function autoOptimise(node, forecast) {
     await optimiseForecast(deviceEnergyManagement, forecast);
 }
 
-nodes.forEach(async (nodeId) => {
-    if (isTimeServer(nodeId)) {
+// The nodes already being watched, so a node is only set up once.
+//
+const watchedNodeIds = new Set();
+
+// Once a node is connected, start following its prices and forecast.
+//
+function onNodeConnected(node) {
+
+    watchPrices(node);
+
+    console.log('Attempting to subscribe to the forecast');
+
+    const deviceEnergyManagement = findDeviceEnergyManagement(node);
+
+    if (deviceEnergyManagement) {
+
+        deviceEnergyManagement.addForecastAttributeListener(value => {
+            console.log("Forecast Updated", value);
+
+            if (value) {
+                io.emit("forecast", forecastToUnix(value));
+            } else {
+                io.emit("forecast", null);
+            }
+        });
+
+    } else {
+        console.error('No cluster client available for the DeviceEnergyManager...');
+    }
+}
+
+// Follow a commissioned node's changes, so its forecasts are optimised and
+// its prices used. Called at startup and when a node is commissioned.
+//
+async function watchNode(nodeId) {
+
+    if (isTimeServer(nodeId) || watchedNodeIds.has(nodeId.toString())) {
         return;
     }
+
+    watchedNodeIds.add(nodeId.toString());
 
     const node = await commissioningController.getNode(nodeId);
 
@@ -391,39 +471,11 @@ nodes.forEach(async (nodeId) => {
         console.log(`attributeChangedCallback ${nodeId}: Attribute ${endpointId}/${clusterId}/${attributeName} changed to ${Diagnostic.json(value)}`);
     });
 
-    if (!node.isConnected) {
-        node.connect();
-    }
-
     node.events.stateChanged.on(async (info) => {
         switch (info) {
             case NodeStates.Connected:
                 console.log(`state changed: Node ${nodeId} connected!`);
-
-                watchPrices(node);
-
-                {
-                    console.log('Attempting to subscribe to the forecast');
-
-                    const deviceEnergyManagement = findDeviceEnergyManagement(node);
-
-                    if (deviceEnergyManagement) {
-
-                        deviceEnergyManagement.addForecastAttributeListener(value => {
-                            console.log("Forecast Updated", value);
-
-                            if (value) {
-                                io.emit("forecast", forecastToUnix(value));
-                            } else {
-                                io.emit("forecast", null);
-                            }
-                        });
-
-                    } else {
-                        console.error('No cluster client available for the DeviceEnergyManager...');
-                    }
-                }
-
+                onNodeConnected(node);
                 break;
             case NodeStates.Disconnected:
                 console.log(`state changed: Node ${nodeId} disconnected`);
@@ -439,7 +491,18 @@ nodes.forEach(async (nodeId) => {
                 break;
         }
     });
-});
+
+    // A newly commissioned node is already connected, so it won't report
+    // connecting.
+    //
+    if (node.isConnected) {
+        onNodeConnected(node);
+    } else {
+        node.connect();
+    }
+}
+
+nodes.forEach(nodeId => watchNode(nodeId).catch(error => console.error(`Failed to watch node ${nodeId}`, error)));
 
 app.get("/devices", async (request, response) => {
 
@@ -527,6 +590,8 @@ app.post("/devices", async (request, response) => {
     const nodeId = await commissioningController.commissionNode(options);
 
     console.log(`Commissioning successfully done with nodeId ${nodeId}`);
+
+    watchNode(nodeId).catch(error => console.error(`Failed to watch node ${nodeId}`, error));
 
     response.send({ id: nodeId.toString() });
 });
@@ -625,6 +690,9 @@ app.delete("/devices/:nodeId", async (request, response) => {
     let node = await commissioningController.getNode(NodeId(nodeId));
 
     await node.decommission();
+
+    forgetPricingServer(nodeId);
+    watchedNodeIds.delete(nodeId.toString());
 
     response.status(204).send();
 });
@@ -742,6 +810,8 @@ app.post("/api/companion/nodes", async (request, response) => {
 
         console.log(`Companion commissioning successfully done with nodeId ${nodeId}`);
 
+        watchNode(nodeId).catch(error => console.error(`Failed to watch node ${nodeId}`, error));
+
         response.send({ nodeId: nodeId.toString() });
     } catch (error) {
         console.error("Companion commissioning failed", error);
@@ -782,6 +852,9 @@ app.delete("/api/companion/nodes/:nodeId", async (request, response) => {
         return;
     }
 
+    forgetPricingServer(nodeId);
+    watchedNodeIds.delete(nodeId.toString());
+
     const nodeNames = await getNodeNames();
     delete nodeNames[nodeId];
     await companionStorage.set("nodeNames", nodeNames);
@@ -808,6 +881,30 @@ app.delete("/api/companion/notifications", async (request, response) => {
     await companionStorage.delete("notifications");
 
     response.status(204).send();
+});
+
+app.get("/auto-optimisation", async (request, response) => {
+    response.send({ enabled: autoOptimisation });
+});
+
+app.put("/auto-optimisation", async (request, response) => {
+
+    const { enabled } = request.body ?? {};
+
+    if (typeof enabled !== "boolean") {
+        response.status(400).send({ error: "enabled must be true or false" });
+        return;
+    }
+
+    autoOptimisation = enabled;
+
+    await settingsStorage.set("autoOptimisation", enabled);
+
+    console.log(`Automatic optimisation turned ${enabled ? "on" : "off"}`);
+
+    io.emit("autoOptimisation", enabled);
+
+    response.send({ enabled });
 });
 
 app.get("/prices", async (request, response) => {

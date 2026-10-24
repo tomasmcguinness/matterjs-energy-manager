@@ -1,7 +1,8 @@
 'use client'
 
-import TariffTimeline from '../../tariffTimeline.tsx';
+import PriceTimeline, { Prices } from '../../priceTimeline.tsx';
 import { useEffect, useState } from 'react';
+import { Manager } from 'socket.io-client';
 import DeviceView from '../../deviceView.tsx';
 import { apiUrl } from '../../api.ts';
 
@@ -10,13 +11,21 @@ export default function Page() {
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
 
   const [isOptimising, setIsOptimising] = useState<boolean>(false);
-  const [prices, setPrices] = useState<number[]>([]);
+  const [prices, setPrices] = useState<Prices | null>(null);
 
   const [devices, setDevices] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch(apiUrl('/tariff')).then(r => r.json()).then(data => { setPrices(data); });
+    fetch(apiUrl('/prices')).then(r => r.json()).then(data => { setPrices(data); });
     fetch(apiUrl('/devices')).then(r => r.json()).then(data => { setDevices(data); });
+
+    // The pricing server publishes new prices as they change.
+    //
+    const manager = new Manager(apiUrl(), {
+      reconnectionDelayMax: 10000,
+    });
+
+    manager.socket("/").on("prices", (data: Prices) => setPrices(data));
 
     setCurrentTime(new Date())
 
@@ -24,7 +33,10 @@ export default function Page() {
     //
     const timer = setInterval(() => setCurrentTime(new Date()), 60 * 1000);
 
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      manager.engine?.close();
+    };
   }, []);
 
   const handleOptimiseClick = () => {
@@ -54,7 +66,7 @@ export default function Page() {
           Electricity Price
         </div>
         <div className="card-body">
-          <TariffTimeline prices={prices} currentTime={currentTime} />
+          <PriceTimeline prices={prices} currentTime={currentTime} />
         </div>
       </div>
 

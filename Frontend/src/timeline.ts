@@ -1,4 +1,4 @@
-// Shared time axis for the energy charts, so the tariff and device forecasts
+// Shared time axis for the energy charts, so the price and device forecasts
 // line up. All times are milliseconds since the Unix epoch.
 //
 export const HOUR_MS = 60 * 60 * 1000;

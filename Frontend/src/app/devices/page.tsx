@@ -147,6 +147,9 @@ export default function Page() {
         case 117:
           name = "Dishwasher";
           break;
+        case 1299:
+          name = "Electrical Energy Tariff";
+          break;
       }
 
       return (<span key={dt} className="badge bg-primary" style={{ marginRight: '5px' }}>{name}</span>)

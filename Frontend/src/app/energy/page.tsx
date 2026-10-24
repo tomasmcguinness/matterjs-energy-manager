@@ -44,7 +44,12 @@ export default function Page() {
     fetch(`${apiUrl()}/optimise`, { method: "POST" }).then(() => setIsOptimising(false));
   };
 
-  var deviceCards = devices.map((device, index) => {
+  // Only devices with Device Energy Management forecast their power usage,
+  // so leave out the rest, such as the pricing server.
+  //
+  const DEVICE_ENERGY_MANAGEMENT = 1293;
+
+  var deviceCards = devices.filter(device => device.deviceTypes.includes(DEVICE_ENERGY_MANAGEMENT)).map((device, index) => {
 
     return (<div key={`device_${index}`} className="card" style={{ marginBottom: '10px' }}>
         <div className="card-header">

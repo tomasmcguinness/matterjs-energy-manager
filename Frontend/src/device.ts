@@ -1,4 +1,12 @@
-import { NodeStates, PairedNode } from "@project-chip/matter.js/device"
+// Mirrors matter.js's NodeStates. It's copied rather than imported because
+// importing matter.js here pulls the whole library into the browser bundle.
+//
+export enum NodeStates {
+    Connected = 0,
+    Disconnected = 1,
+    Reconnecting = 2,
+    WaitingForDeviceDiscovery = 3
+}
 
 export type Slot = {
     nominalPower: number,
@@ -13,7 +21,7 @@ export type Forecast = {
 
 type Device = {
     id: string,
-    state?: string,
+    state?: NodeStates,
     manufacturer?: string,
     forecast?: Forecast,
     deviceTypes: number[],

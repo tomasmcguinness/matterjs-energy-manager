@@ -6,9 +6,8 @@ import Link from 'next/link'
 import Badge from 'react-bootstrap/Badge';
 import Container from 'react-bootstrap/Container';
 import Alert from 'react-bootstrap/Alert';
-import { NodeStates } from '@project-chip/matter.js/device';
 import { Manager } from 'socket.io-client';
-import Device from '../../device.ts';
+import Device, { NodeStates } from '../../device.ts';
 import { apiUrl } from '../../api.ts';
 
 export default function Page() {

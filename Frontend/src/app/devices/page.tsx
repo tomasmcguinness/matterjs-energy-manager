@@ -9,6 +9,7 @@ import Alert from 'react-bootstrap/Alert';
 import { NodeStates } from '@project-chip/matter.js/device';
 import { Manager } from 'socket.io-client';
 import Device from '../../device.ts';
+import { deviceTypeNames } from '../../names.ts';
 
 export default function Page() {
 
@@ -44,8 +45,8 @@ export default function Page() {
       console.log("Status Update: " + nodeId);
     });
 
-    socket.on("forecast", (forecast: any) => {
-      console.log("Forecast Updated: " + forecast.forecastId);
+    socket.on("forecast", (update: any) => {
+      console.log(`Forecast Updated: ${update.nodeId}/${update.endpointId} #${update.forecast?.forecastId}`);
     });
   }, []);
 
@@ -75,38 +76,14 @@ export default function Page() {
   }
 
   const deviceTRs = devices.map((device) => {
-    const deviceTypes = device.deviceTypes.map(dt => {
+    const deviceTypes = (device.deviceTypes ?? []).map(dt => {
 
-      var name = dt.toString();
-
-      switch (dt) {
-        case 777:
-          name = "Heat Pump";
-          break;
-        case 1296:
-          name = "Electrical Sensor";
-          break;
-        case 17:
-          name = "Power Source";
-          break;
-        case 769:
-          name = "Thermostat";
-          break;
-        case 770:
-          name = "Temperature Sensor";
-          break;
-        case 1293:
-          name = "Device Energy Manager";
-          break;
-        case 117:
-          name = "Dishwasher";
-          break;
-      }
+      var name = deviceTypeNames[dt] ?? dt.toString();
 
       return (<span key={dt} className="badge bg-primary" style={{ marginRight: '5px' }}>{name}</span>)
     });
 
-    return (<tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => handleRowClick(device)}><td>{device.id}</td><td>{deviceTypes}</td><td style={{ width: '1%' }}>{getStateBadge(device.state)}</td></tr>)
+    return (<tr key={device.id} style={{ cursor: 'pointer' }} onClick={() => handleRowClick(device)}><td>{device.id}{device.productName && <> · {device.productName}</>}</td><td>{deviceTypes}</td><td style={{ width: '1%' }}>{getStateBadge(device.state)}</td></tr>)
   });
 
   var body = null;

@@ -12,6 +12,8 @@ import { NodeStates } from "@project-chip/matter.js/device";
 
 const app = express();
 app.use(express.json());
+// Matter values (node ids, energy, power) can be bigint, which JSON can't represent natively.
+app.set("json replacer", (_key, value) => typeof value === "bigint" ? Number(value) : value);
 app.use(cors());
 
 const server = http.createServer(app);
@@ -70,65 +72,119 @@ await commissioningController.start();
 
 let nodes = await commissioningController.getCommissionedNodes();
 
-nodes.forEach(async (nodeId) => {
+/*
+ * Device Energy Management endpoints, discovered on every node when it connects.
+ * Keyed by "nodeId/endpointId".
+ */
+const demEndpoints = new Map();
+
+const demKey = (nodeId, endpointId) => `${nodeId}/${endpointId}`;
+
+// Matter attributes can contain bigint values, which JSON (and socket.io) can't serialise.
+const toJson = (value) => value === undefined ? null : JSON.parse(JSON.stringify(value, (_key, v) => typeof v === "bigint" ? Number(v) : v));
+
+/** All endpoints of a node, including nested parts such as a heat pump's or solar inverter's children. */
+const allEndpoints = (node) => {
+    const result = [];
+    const visit = (endpoint) => {
+        result.push(endpoint);
+        for (const part of endpoint.parts.values()) {
+            visit(part);
+        }
+    };
+    node.getDevices().forEach(visit);
+    return result;
+};
+
+const describeDemEndpoint = (entry) => ({
+    nodeId: entry.nodeId,
+    endpointId: entry.endpointId,
+    deviceTypes: entry.deviceTypes,
+    esaType: entry.esaType,
+    esaCanGenerate: entry.esaCanGenerate,
+    esaState: entry.esaState,
+    features: entry.features,
+    optOutState: entry.optOutState,
+    forecast: toJson(entry.forecast),
+});
+
+/** Finds every endpoint with a DEM cluster and subscribes to its forecast and opt-out state. */
+const discoverDemEndpoints = async (nodeId, node) => {
+    for (const endpoint of allEndpoints(node)) {
+
+        const deviceEnergyManagement = endpoint.getClusterClient(DeviceEnergyManagement.Complete);
+
+        if (!deviceEnergyManagement) {
+            continue;
+        }
+
+        const key = demKey(nodeId, endpoint.number);
+        const known = demEndpoints.get(key);
+        const entry = known ?? { nodeId: nodeId.toString(), endpointId: endpoint.number };
+
+        entry.client = deviceEnergyManagement;
+        entry.features = deviceEnergyManagement.supportedFeatures;
+
+        const descriptor = endpoint.getClusterClient(DescriptorCluster);
+        entry.deviceTypes = descriptor ? (await descriptor.getDeviceTypeListAttribute()).map(dt => dt.deviceType) : [];
+        entry.esaType = await deviceEnergyManagement.getEsaTypeAttribute();
+        entry.esaCanGenerate = await deviceEnergyManagement.getEsaCanGenerateAttribute();
+        entry.esaState = await deviceEnergyManagement.getEsaStateAttribute();
+        entry.forecast = await deviceEnergyManagement.getForecastAttribute();
+
+        // OptOutState only exists when the device supports an adjustment feature.
+        const adjustable = entry.features.powerAdjustment || entry.features.startTimeAdjustment || entry.features.pausable
+            || entry.features.forecastAdjustment || entry.features.constraintBasedAdjustment;
+        entry.optOutState = adjustable ? await deviceEnergyManagement.getOptOutStateAttribute() : undefined;
+
+        demEndpoints.set(key, entry);
+
+        // Listeners survive reconnects, so only add them the first time this endpoint is seen.
+        if (!known) {
+            deviceEnergyManagement.addForecastAttributeListener(value => {
+                console.log(`Forecast updated for ${key}`, Diagnostic.json(value));
+                entry.forecast = value;
+                io.emit("forecast", { nodeId: entry.nodeId, endpointId: entry.endpointId, forecast: toJson(value) });
+            });
+
+            deviceEnergyManagement.addEsaStateAttributeListener(value => {
+                entry.esaState = value;
+                io.emit("esaState", { nodeId: entry.nodeId, endpointId: entry.endpointId, value });
+            });
+
+            if (adjustable) {
+                deviceEnergyManagement.addOptOutStateAttributeListener(value => {
+                    entry.optOutState = value;
+                    io.emit("optOutState", { nodeId: entry.nodeId, endpointId: entry.endpointId, value });
+                });
+            }
+        }
+
+        io.emit("demEndpoint", describeDemEndpoint(entry));
+    }
+};
+
+/** Subscribes to a commissioned node's events and connects to it. */
+const setupNode = async (nodeId) => {
     const node = await commissioningController.getNode(nodeId);
 
     node.events.attributeChanged.on(({ path: { nodeId, clusterId, endpointId, attributeName }, value }) => {
 
-        console.log({ clusterId });
-
         if (clusterId === OperationalState.id) {
-            io.emit("operationalState", value);
-        }
-
-        if (clusterId === 0x98) {
-            console.log({ attributeName });
-
-            if (attributeName === "optOutState") {
-                io.emit("optOutState", value);
-            }
+            io.emit("operationalState", { nodeId: nodeId.toString(), endpointId, attributeName, value: toJson(value) });
         }
 
         console.log(`attributeChangedCallback ${nodeId}: Attribute ${endpointId}/${clusterId}/${attributeName} changed to ${Diagnostic.json(value)}`);
     });
-
-    if (!node.isConnected) {
-        node.connect();
-    }
 
     node.events.stateChanged.on(async (info) => {
         switch (info) {
             case NodeStates.Connected:
                 console.log(`state changed: Node ${nodeId} connected!`);
 
-                var endpoint = node.getDeviceById(1);
+                await discoverDemEndpoints(nodeId, node).catch(error => console.error(`DEM discovery failed for node ${nodeId}`, error));
 
-                // TODO Find the DeviceEnergyManagement dynamically cluster
-                // If a device even has one.
-                //
-                if (endpoint) {
-
-                    console.log('Attempting to subscribe to the forecast');
-
-                    const deviceEnergyManagement = endpoint.getClusterClient(DeviceEnergyManagement.Complete);
-
-                    if (deviceEnergyManagement) {
-
-                        deviceEnergyManagement.addForecastAttributeListener(value => {
-                            console.log("Forecast Updated", value);
-
-                            if (value) {
-                                io.emit("forecast", value);
-                            } else {
-                                io.emit("forecast", null);
-                            }
-                        });
-
-                    } else {
-                        console.error('No cluster client available for the DeviceEnergyManager...');
-                    }
-                }
-
+                io.emit("status", nodeId.toString());
                 break;
             case NodeStates.Disconnected:
                 console.log(`state changed: Node ${nodeId} disconnected`);
@@ -144,7 +200,16 @@ nodes.forEach(async (nodeId) => {
                 break;
         }
     });
-});
+
+    // A node that was just commissioned is already connected, so the Connected state won't be reported again.
+    if (node.isConnected) {
+        await discoverDemEndpoints(nodeId, node).catch(error => console.error(`DEM discovery failed for node ${nodeId}`, error));
+    } else {
+        node.connect();
+    }
+};
+
+nodes.forEach(setupNode);
 
 app.get("/devices", async (request, response) => {
 
@@ -162,9 +227,16 @@ app.get("/devices", async (request, response) => {
 
         var deviceTypes = [];
 
+        // The root parts list includes nested endpoints, which getDeviceById() doesn't return.
+        const endpointsByNumber = new Map(allEndpoints(node).map(e => [e.number, e]));
+
         for (const endpointId of partsList) {
 
-            const endpoint = node.getDeviceById(endpointId);
+            const endpoint = endpointsByNumber.get(endpointId);
+
+            if (!endpoint) {
+                continue;
+            }
 
             // Get the Descriptor cluster client
             const descriptorCluster = endpoint.getClusterClient(DescriptorCluster);
@@ -173,13 +245,16 @@ app.get("/devices", async (request, response) => {
             const deviceTypeList = await descriptorCluster.getDeviceTypeListAttribute();
 
             for (const deviceType of deviceTypeList) {
-                deviceTypes.push(deviceType.deviceType)
+                if (!deviceTypes.includes(deviceType.deviceType)) {
+                    deviceTypes.push(deviceType.deviceType)
+                }
             }
         }
 
         return {
-            id: nodeId.toString(), state: node.state,
-            manufacturer: node?.basicInformation?.manufacturerName?.toString(), 
+            id: nodeId.toString(), state: node.connectionState,
+            manufacturer: node?.basicInformation?.vendorName,
+            productName: node?.basicInformation?.productName, 
             deviceTypes, 
         }
     });
@@ -220,7 +295,9 @@ app.post("/devices", async (request, response) => {
 
     console.log(`Commissioning successfully done with nodeId ${nodeId}`);
 
-    return new Response("data", { status: 200 })
+    await setupNode(nodeId);
+
+    response.send({ nodeId: nodeId.toString() });
 });
 
 app.get("/devices/:nodeId", async (request, response) => {
@@ -231,46 +308,51 @@ app.get("/devices/:nodeId", async (request, response) => {
 
     response.send({
         id: nodeId.toString(),
-        state: node.state,
-        manufacturer: node?.basicInformation?.manufacturerName?.toString(),
+        state: node.connectionState,
+        manufacturer: node?.basicInformation?.vendorName,
+            productName: node?.basicInformation?.productName,
     });
 });
 
+app.get("/devices/:nodeId/energy", async (request, response) => {
+
+    const { nodeId } = request.params;
+
+    const endpoints = [...demEndpoints.values()].filter(entry => entry.nodeId === nodeId).map(describeDemEndpoint);
+
+    response.send(endpoints);
+});
+
+// Returns the forecast of the node's first DEM endpoint.
 app.get("/devices/:nodeId/forecast", async (request, response) => {
 
     const { nodeId } = request.params;
 
-    console.log(`Fetching forecast for device ${nodeId}`);
+    const entry = [...demEndpoints.values()].find(entry => entry.nodeId === nodeId && entry.forecast);
 
-    let node = await commissioningController.getNode(NodeId(nodeId));
-
-    const endpoint = node.getDeviceById(1);
-
-    var forecast = null;
-
-    if (endpoint) {
-
-        const deviceEnergyManagement = endpoint.getClusterClient(DeviceEnergyManagement.Complete);
-
-        console.log({ deviceEnergyManagement });
-
-        if (deviceEnergyManagement) {
-            forecast = await deviceEnergyManagement.getForecastAttribute();
-        }
-    }
-
-    if (forecast) {
-        console.log({ forecast });
-
-        if (forecast.startTime === 0) {
-            response.status(204).send();
-        } else {
-            response.send(forecast);
-        }
+    if (entry) {
+        response.send(toJson(entry.forecast));
     } else {
         console.log('No forecast available for device. Return 204');
         response.status(204).send();
     }
+});
+
+app.get("/devices/:nodeId/endpoints/:endpointId/forecast", async (request, response) => {
+
+    const { nodeId, endpointId } = request.params;
+
+    const entry = demEndpoints.get(demKey(nodeId, endpointId));
+
+    if (entry?.forecast) {
+        response.send(toJson(entry.forecast));
+    } else {
+        response.status(204).send();
+    }
+});
+
+app.get("/energy/devices", async (request, response) => {
+    response.send([...demEndpoints.values()].map(describeDemEndpoint));
 });
 
 app.delete("/devices/:nodeId", async (request, response) => {
@@ -280,6 +362,12 @@ app.delete("/devices/:nodeId", async (request, response) => {
     let node = await commissioningController.getNode(NodeId(nodeId));
 
     await node.decommission();
+
+    for (const [key, entry] of demEndpoints) {
+        if (entry.nodeId === nodeId) {
+            demEndpoints.delete(key);
+        }
+    }
 
     response.status(204).send();
 });
@@ -367,138 +455,106 @@ app.post("/tariff/configuration", async (request, response) => {
     response.status(204).send();
 });
 
-const getForecast = async () => {
+/** Tariff price (pence per kWh) at a given time, from the half-hourly tariff structure. */
+const priceAt = (unixSeconds) => {
+    const date = new Date(unixSeconds * 1000);
+    const hour = date.getHours();
+    const minute = date.getMinutes();
+    return tariffStructure.find(t => t.hour === hour && minute >= t.startMinute && minute <= t.endMinute).price;
+};
 
-    // Fetch the current forecast from the device.
-    //
-    const nodeDetails = await commissioningController.getCommissionedNodes();
+const OPTIMISATION_STEP_SECONDS = 60;
 
-    const nodeId = nodeDetails[1];
+/** Cost in pence of running a forecast starting at the given time, evaluated minute by minute. */
+const costOfForecast = (slots, startTime) => {
+    let cost = 0;
+    let offset = 0;
 
-    let node = await commissioningController.getNode(nodeId);
+    for (const slot of slots) {
+        const powerInKiloWatt = Number(slot.nominalPower ?? 0) / 1000000; // Matter uses milliwatts
 
-    const devices = node.getDevices();
+        for (let t = 0; t < slot.defaultDuration; t += OPTIMISATION_STEP_SECONDS) {
+            const seconds = Math.min(OPTIMISATION_STEP_SECONDS, slot.defaultDuration - t);
+            cost += powerInKiloWatt * (seconds / 3600) * priceAt(startTime + offset + t);
+        }
 
-    var forecast = null;
+        offset += slot.defaultDuration;
+    }
 
-    if (devices[1] && devices[1].number === 2) {
+    return cost;
+};
 
-        const deviceEnergyManagement = devices[1].getClusterClient(DeviceEnergyManagement.Complete);
+/**
+ * Picks the cheapest start for one DEM endpoint within the window the device offers and requests it.
+ * Returns a summary describing what was done.
+ */
+const optimiseEndpoint = async (entry) => {
+    const summary = { nodeId: entry.nodeId, endpointId: entry.endpointId, esaType: entry.esaType };
 
-        if (deviceEnergyManagement) {
-            forecast = await deviceEnergyManagement.getForecastAttribute();
+    if (!entry.features?.startTimeAdjustment) {
+        return { ...summary, action: "skipped", reason: "Start time can't be adjusted" };
+    }
+
+    // Local optimisation is only allowed when the user hasn't opted out of it.
+    const { NoOptOut, GridOptOut } = DeviceEnergyManagement.OptOutState;
+    if (entry.optOutState !== NoOptOut && entry.optOutState !== GridOptOut) {
+        return { ...summary, action: "skipped", reason: "Opted out of local optimisation" };
+    }
+
+    const forecast = entry.forecast;
+    if (!forecast || forecast.earliestStartTime === undefined || forecast.latestEndTime === undefined) {
+        return { ...summary, action: "skipped", reason: "No forecast with a start window" };
+    }
+
+    const currentTime = Math.floor(Date.now() / 1000);
+    const duration = forecast.endTime - forecast.startTime;
+    // A null earliestStartTime means "now". Candidates are aligned to whole minutes.
+    const earliestAllowed = Math.max(currentTime + OPTIMISATION_STEP_SECONDS, forecast.earliestStartTime ?? currentTime);
+    const earliestStart = Math.ceil(earliestAllowed / OPTIMISATION_STEP_SECONDS) * OPTIMISATION_STEP_SECONDS;
+    const latestStart = forecast.latestEndTime - duration;
+
+    if (latestStart < earliestStart) {
+        return { ...summary, action: "skipped", reason: "No flexibility in the start window" };
+    }
+
+    let best = { startTime: forecast.startTime, cost: costOfForecast(forecast.slots, forecast.startTime) };
+    const currentCost = best.cost;
+
+    for (let startTime = earliestStart; startTime <= latestStart; startTime += OPTIMISATION_STEP_SECONDS) {
+        const cost = costOfForecast(forecast.slots, startTime);
+        if (cost < best.cost - 0.0001) {
+            best = { startTime, cost };
         }
     }
 
-    return forecast;
-}
+    if (best.startTime === forecast.startTime) {
+        return { ...summary, action: "unchanged", startTime: forecast.startTime, cost: currentCost };
+    }
+
+    // matter.js takes epoch-s values as Unix seconds and converts them to the Matter epoch on the wire.
+    await entry.client.startTimeAdjustRequest({
+        requestedStartTime: best.startTime,
+        cause: DeviceEnergyManagement.AdjustmentCause.LocalOptimization
+    });
+
+    // The device publishes its adjusted forecast, which reaches the UI through the forecast listener.
+    return { ...summary, action: "moved", from: forecast.startTime, startTime: best.startTime, previousCost: currentCost, cost: best.cost };
+};
 
 app.post("/optimise", async (request, response) => {
 
-    // TODO The routine to perform the optimization based on the current 
-    // forecasts.
+    const results = [];
 
-    // Ideas:
-    // Do minute by minute?
-    // Use costs as the signal of efficiency.
-    // Test the cost of the forecast by simulating
-
-    // Based on the current time, generate a tariff.
-    //
-    var currentTime = Math.floor(Date.now() / 1000);
-
-    var tariffSlots = generateTariff(currentTime);
-
-    //console.log({ tariffSlots });
-
-    var forecast = await getForecast();
-
-    //console.log({ forecast });
-
-    // Turn tariff into a timeseries.
-    //
-    let tariffTimeSeries = tariffSlots.reduce((accumulator, tariffSlot) => {
-
-        for (var i = 0; i < tariffSlot.duration; i++) {
-            accumulator.push(tariffSlot.price);
+    for (const entry of demEndpoints.values()) {
+        try {
+            results.push(await optimiseEndpoint(entry));
+        } catch (error) {
+            console.error(`Optimisation failed for ${demKey(entry.nodeId, entry.endpointId)}`, error);
+            results.push({ nodeId: entry.nodeId, endpointId: entry.endpointId, action: "failed", reason: String(error) });
         }
-
-        return accumulator;
-    }, []);
-
-    //console.log({ tariffTimeSeries });
-
-    // Turn forecast into a timeseries.
-    //
-    let dishwasherTimeSeries = forecast.slots.reduce((accumulator, currentValue) => {
-
-        for (var i = 0; i < currentValue.defaultDuration; i++) {
-            accumulator.push(currentValue.nominalPower);
-        }
-
-        return accumulator;
-    }, []);
-
-    //console.log({ dishwasherTimeSeries });
-
-    let simulationOutcomes = [];
-    let maximumSimulationDelayInHours = 12;
-    let simulationLengthInSeconds = maximumSimulationDelayInHours * 60 * 60;
-
-    for (var simulationNumber = 0; simulationNumber < simulationLengthInSeconds; simulationNumber++) {
-
-        // Calculate the cost of the running the dishwasher at this specific offset.
-        // TODO Take earlistStartTime into account.
-        //
-        var totalCostInPennies = dishwasherTimeSeries.reduce((accumulator, power, index) => {
-            var tariffPrice = tariffTimeSeries[index + simulationNumber];
-
-            let powerInKiloWatt = power / 1000000; // convert from milliwatts to kilowatts (Matter uses milliwatts)
-            let price = (powerInKiloWatt / 3600) * tariffPrice;
-
-            //console.log({ powerInKiloWatt, price });
-
-            return accumulator + price;
-        }, 0);
-
-        //console.log({ simulationNumber, totalCostInPennies });
-
-        simulationOutcomes.push({ delay: simulationNumber, totalCost: Math.floor(totalCostInPennies) });
-
-        //console.log(`[${simulationNumber}] Total Cost: ${Math.floor(totalCostInPennies)}p`);
     }
 
-    // Based on the cheapest simulation, perform the actions
-    //
-    let cheapestSimulation = simulationOutcomes.reduce((min, obj) => {
-        return min.totalCost <= obj.totalCost ? min : obj;
-    });
+    console.log({ results });
 
-    console.log({ cheapestSimulation });
-
-    const nodeDetails = await commissioningController.getCommissionedNodes();
-
-    const nodeId = nodeDetails[1];
-
-    let node = await commissioningController.getNode(nodeId);
-
-    const devices = node.getDevices();
-
-    if (devices[1] && devices[1].number === 2) {
-
-        const deviceEnergyManagement = devices[1].getClusterClient(DeviceEnergyManagement.Complete);
-
-        let newStartTime = currentTime + cheapestSimulation.delay;
-
-        await deviceEnergyManagement.startTimeAdjustRequest({
-            requestedStartTime: newStartTime,
-            cause: DeviceEnergyManagement.AdjustmentCause.LocalOptimization
-        });
-
-        forecast.startTime = newStartTime;
-
-        io.emit("forecast", forecast);
-    }
-
-    response.send(simulationOutcomes);
+    response.send(results);
 });

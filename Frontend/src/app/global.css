@@ -82,3 +82,82 @@
     background-color: green;
     color: white;
 }
+/* Forecast strip: a 48 hour window from midnight today with slots positioned by time */
+.energyForecastContainer .forecastStrip {
+    position: relative;
+    height: 90px;
+    border: 1px solid #ccc;
+    background: repeating-linear-gradient(90deg, transparent, transparent calc(12.5% - 1px), #eee calc(12.5% - 1px), #eee 12.5%);
+    overflow: hidden;
+}
+
+.energyForecastContainer .forecastSlot {
+    position: absolute;
+    bottom: 0;
+    background-color: #4A90E2;
+    color: white;
+    font-size: 0.7rem;
+    overflow: hidden;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.energyForecastContainer .forecastSlot.generation {
+    background-color: #2E9E5B;
+}
+
+.energyForecastContainer .forecastSlot.active {
+    outline: 2px solid #000;
+    outline-offset: -2px;
+}
+
+.energyForecastContainer .startWindow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: repeating-linear-gradient(-45deg, rgba(74, 144, 226, 0.08), rgba(74, 144, 226, 0.08) 4px, rgba(74, 144, 226, 0.2) 4px, rgba(74, 144, 226, 0.2) 8px);
+    border-left: 1px dashed #4A90E2;
+    border-right: 1px dashed #4A90E2;
+}
+
+.energyForecastContainer .nowMarker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: red;
+}
+
+.energyForecastContainer .midnightMarker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: #999;
+}
+
+.energyForecastContainer .forecastTicks {
+    position: relative;
+    height: 1.2rem;
+    font-size: 0.7rem;
+    color: #666;
+}
+
+.energyForecastContainer .forecastTicks .tick {
+    position: absolute;
+    transform: translateX(-50%);
+}
+
+.energyForecastContainer .forecastTicks .tick:first-child {
+    transform: none;
+}
+
+.energyForecastContainer .forecastTicks .tick:last-child {
+    transform: translateX(-100%);
+}
+
+.energyForecastContainer .forecastSummary {
+    font-size: 0.8rem;
+    color: #444;
+    margin-top: 0.25rem;
+}

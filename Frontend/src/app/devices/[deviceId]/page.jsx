@@ -1,9 +1,10 @@
 'use client'
 
 import Link from 'next/link.js';
-import { use, useState, useEffect, useRef } from 'react';
+import { use, useState, useEffect } from 'react';
 import { Button, Container } from 'react-bootstrap';
 import { Manager } from 'socket.io-client';
+import { esaTypeNames, optOutStateNames } from '../../../names.ts';
 
 // export default function Page({
 //   params,
@@ -18,10 +19,11 @@ export default function Page({ params }) {
   const { deviceId } = use(params);
 
   const [device, setDevice] = useState(null);
-  const deviceRef = useRef(device);
+  const [energyEndpoints, setEnergyEndpoints] = useState([]);
 
   useEffect(() => {
-    fetch(`http://localhost:4000/devices/${deviceId}`).then(r => r.json()).then(data => { setDevice(data); deviceRef.current = data; });
+    fetch(`http://localhost:4000/devices/${deviceId}`).then(r => r.json()).then(data => { setDevice(data); });
+    fetch(`http://localhost:4000/devices/${deviceId}/energy`).then(r => r.json()).then(data => { setEnergyEndpoints(data); });
   }, []);
 
   useEffect(() => {
@@ -41,14 +43,16 @@ export default function Page({ params }) {
       }
     });
 
-    socket.on("optOutState", (state) => {
-      console.log("Opt Out State Update: " + state);
-      console.log(deviceRef.current);
-      if(deviceRef.current) {
-        deviceRef.current.optOut = state;
-        setDevice({ ...deviceRef.current });
+    socket.on("optOutState", ({ nodeId, endpointId, value }) => {
+      console.log(`Opt Out State Update: ${nodeId}/${endpointId} ${value}`);
+      if (nodeId === deviceId) {
+        setEnergyEndpoints(current => current.map(e => e.endpointId === endpointId ? { ...e, optOutState: value } : e));
       }
     });
+
+    return () => {
+      socket.disconnect();
+    };
   }, []);
 
   const unpairDevice = () => {
@@ -59,20 +63,32 @@ export default function Page({ params }) {
     }
   };
 
-  let optOutStatus = <></>;
-
-  if (device) {
-    if (device.optOut === 3) {
-      optOutStatus = <span className="badge text-bg-danger">Opted Out</span>
-    } else if (device.optOut === 0) {
-      optOutStatus = <span className="badge text-bg-success">Opted In</span>
+  const optOutBadge = (optOutState) => {
+    if (optOutState === undefined) {
+      return <span className="badge text-bg-secondary">Forecast only</span>;
     }
-  }
+    return <span className={`badge ${optOutState === 0 ? 'text-bg-success' : 'text-bg-danger'}`}>{optOutStateNames[optOutState]}</span>;
+  };
+
+  const energyRows = energyEndpoints.map(endpoint => (
+    <tr key={endpoint.endpointId}>
+      <td>{endpoint.endpointId}</td>
+      <td>{esaTypeNames[endpoint.esaType] ?? endpoint.esaType}</td>
+      <td>{Object.entries(endpoint.features ?? {}).filter(([, on]) => on).map(([name]) => name).join(', ')}</td>
+      <td>{optOutBadge(endpoint.optOutState)}</td>
+    </tr>
+  ));
 
   return <Container>
-    <h1>{deviceId}</h1>
+    <h1>{device?.productName ?? deviceId} <small className="text-body-secondary">node {deviceId}</small></h1>
     <hr />
-    <h3>Device Energy Management : {optOutStatus}</h3>
+    <h3>Device Energy Management</h3>
+    {energyRows.length === 0
+      ? <div className="alert alert-info">This device has no Device Energy Management endpoints.</div>
+      : <table className="table">
+        <thead><tr><th>Endpoint</th><th>ESA type</th><th>Features</th><th>Opt out</th></tr></thead>
+        <tbody>{energyRows}</tbody>
+      </table>}
     <Link href="/devices" className="btn btn-secondary" style={{ marginRight: '5px' }}>Back to Devices</Link>
     <Button onClick={unpairDevice}>Unpair Device</Button>
   </Container>;

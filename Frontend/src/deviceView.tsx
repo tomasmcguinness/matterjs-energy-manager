@@ -5,12 +5,20 @@ import { Manager } from "socket.io-client";
 
 type DeviceViewProps = {
     nodeId: string;
+    endpointId: number;
+    initialForecast?: Forecast | null;
     currentTime?: Date;
 };
 
-const DeviceView = ({ nodeId, currentTime }: DeviceViewProps) => {
+type ForecastUpdate = {
+    nodeId: string;
+    endpointId: number;
+    forecast: Forecast | null;
+};
 
-    const [forecast, setForecast] = useState<Forecast | null>(null);
+const DeviceView = ({ nodeId, endpointId, initialForecast, currentTime }: DeviceViewProps) => {
+
+    const [forecast, setForecast] = useState<Forecast | null>(initialForecast ?? null);
 
     useEffect(() => {
 
@@ -29,40 +37,29 @@ const DeviceView = ({ nodeId, currentTime }: DeviceViewProps) => {
             }
         });
 
-        socket.on("forecast", (data: Forecast) => {
-            console.log("Forecast Updated");
-
-            if (data) {
-                let forecast: Forecast = {
-                    startTime: data.startTime,
-                    endTime: data.endTime,
-                    slots: [...data.slots]
-                }
-                setForecast(forecast);
-            } else {
-                setForecast(null);
+        socket.on("forecast", (update: ForecastUpdate) => {
+            if (update.nodeId !== nodeId || update.endpointId !== endpointId) {
+                return;
             }
+
+            console.log(`Forecast Updated for ${nodeId}/${endpointId}`);
+
+            setForecast(update.forecast ? { ...update.forecast, slots: [...update.forecast.slots] } : null);
         });
 
         console.log('Fetching initial forecast data');
 
-        fetch(`http://localhost:4000/devices/${nodeId}/forecast`).then(r => r.status === 200 ? r.json() : null).then(data => {
-
-            if (data) {
-                let forecast: Forecast = {
-                    startTime: data.startTime,
-                    endTime: data.endTime,
-                    slots: [...data.slots]
-                }
-                setForecast(forecast);
-            } else {
-                setForecast(null);
-            }
+        fetch(`http://localhost:4000/devices/${nodeId}/endpoints/${endpointId}/forecast`).then(r => r.status === 200 ? r.json() : null).then(data => {
+            setForecast(data ? { ...data, slots: [...data.slots] } : null);
         });
-    }, []);
+
+        return () => {
+            socket.disconnect();
+        };
+    }, [nodeId, endpointId]);
 
     return <div>
-        <ForecastTimeline forecast={forecast} currentTime={currentTime}  />
+        <ForecastTimeline forecast={forecast} currentTime={currentTime} />
     </div>;
 };
 
